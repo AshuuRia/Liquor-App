@@ -50,17 +50,10 @@ export default function LiquorConverter() {
     loadLiquorData();
   }, []);
 
-  // Handle automatic redirect countdown
+  // No auto-redirect
   useEffect(() => {
-    if (shouldRedirect && countdownSeconds > 0) {
-      const timer = setTimeout(() => {
-        setCountdownSeconds(prev => prev - 1);
-      }, 1000);
-      return () => clearTimeout(timer);
-    } else if (shouldRedirect && countdownSeconds === 0) {
-      setLocation('/scanner');
-    }
-  }, [shouldRedirect, countdownSeconds, setLocation]);
+    // Redirect logic removed as per user request
+  }, [shouldRedirect, setLocation]);
 
   const loadLiquorData = async () => {
     setProcessingState({
@@ -304,37 +297,37 @@ export default function LiquorConverter() {
                   </div>
                 )}
                 
-                {isComplete && !hasError && (
-                  <div>
-                    <h2 className="text-xl font-semibold mb-2 text-card-foreground">Data Loaded Successfully!</h2>
-                    <p className="text-sm text-muted-foreground mb-4">
-                      Ready to start scanning barcodes. Redirecting to scanner in {countdownSeconds} seconds...
-                    </p>
-                    <div className="flex justify-center space-x-4">
-                      <Button onClick={goToScanner} data-testid="button-go-scanner">
-                        <Scan className="h-4 w-4 mr-2" />
-                        Go to Scanner Now
-                      </Button>
-                      <Button variant="outline" onClick={downloadExcel} data-testid="button-download">
-                        <Download className="h-4 w-4 mr-2" />
-                        Download Data
-                      </Button>
-                      <div className="relative">
-                        <input
-                          type="file"
-                          accept=".xlsx,.xls"
-                          onChange={onExcelUpload}
-                          className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
-                          id="excel-upload"
-                        />
-                        <Button variant="secondary">
-                          <Book className="h-4 w-4 mr-2" />
-                          Import Excel
-                        </Button>
-                      </div>
-                    </div>
+            {isComplete && !hasError && (
+              <div>
+                <h2 className="text-xl font-semibold mb-2 text-card-foreground">Data Loaded Successfully!</h2>
+                <p className="text-sm text-muted-foreground mb-4">
+                  Ready to start scanning barcodes.
+                </p>
+                <div className="flex justify-center space-x-4">
+                  <Button onClick={goToScanner} data-testid="button-go-scanner" className="bg-emerald-600 hover:bg-emerald-700">
+                    <Scan className="h-4 w-4 mr-2" />
+                    Go to Scanner
+                  </Button>
+                  <Button variant="outline" onClick={downloadExcel} data-testid="button-download">
+                    <Download className="h-4 w-4 mr-2" />
+                    Download Data
+                  </Button>
+                  <div className="relative">
+                    <input
+                      type="file"
+                      accept=".xlsx,.xls"
+                      onChange={onExcelUpload}
+                      className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+                      id="excel-upload"
+                    />
+                    <Button variant="secondary">
+                      <Book className="h-4 w-4 mr-2" />
+                      Import Excel
+                    </Button>
                   </div>
-                )}
+                </div>
+              </div>
+            )}
                 
                 {hasError && (
                   <div>
