@@ -50,10 +50,17 @@ export default function LiquorConverter() {
     loadLiquorData();
   }, []);
 
-  // No auto-redirect
+  // Handle automatic redirect countdown
   useEffect(() => {
-    // Redirect logic removed as per user request
-  }, [shouldRedirect, setLocation]);
+    if (shouldRedirect && countdownSeconds > 0) {
+      const timer = setTimeout(() => {
+        setCountdownSeconds(prev => prev - 1);
+      }, 1000);
+      return () => clearTimeout(timer);
+    } else if (shouldRedirect && countdownSeconds === 0) {
+      setLocation('/scanner');
+    }
+  }, [shouldRedirect, countdownSeconds, setLocation]);
 
   const loadLiquorData = async () => {
     setProcessingState({
@@ -188,61 +195,6 @@ export default function LiquorConverter() {
     loadLiquorData();
   };
 
-  const onExcelUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
-
-    setProcessingState({
-      isProcessing: true,
-      progress: 0,
-      currentRow: 0,
-      totalRows: 0,
-    });
-    setHasError(false);
-    setIsComplete(false);
-
-    const formData = new FormData();
-    formData.append('file', file);
-
-    try {
-      setProcessingState(prev => ({ ...prev, progress: 25 }));
-      const response = await fetch('/api/upload-liquor-excel', {
-        method: 'POST',
-        body: formData,
-      });
-
-      setProcessingState(prev => ({ ...prev, progress: 75 }));
-
-      if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.error || `HTTP error! status: ${response.status}`);
-      }
-
-      const result = await response.json();
-      setProcessingState(prev => ({ ...prev, progress: 100, isProcessing: false }));
-
-      if (result.success) {
-        setProcessedData(result);
-        setIsComplete(true);
-        setShouldRedirect(true);
-        toast({
-          title: "Excel imported successfully!",
-          description: `${result.totalRecords} records loaded from Excel file`,
-        });
-      }
-    } catch (error) {
-      console.error('Excel upload error:', error);
-      setProcessingState(prev => ({ ...prev, isProcessing: false }));
-      setHasError(true);
-      const errorMessage = error instanceof Error ? error.message : "Unknown error";
-      toast({
-        variant: "destructive",
-        title: "Import failed",
-        description: errorMessage,
-      });
-    }
-  };
-
   return (
     <div className="min-h-screen bg-background">
       {/* Header */}
@@ -297,37 +249,24 @@ export default function LiquorConverter() {
                   </div>
                 )}
                 
-            {isComplete && !hasError && (
-              <div>
-                <h2 className="text-xl font-semibold mb-2 text-card-foreground">Data Loaded Successfully!</h2>
-                <p className="text-sm text-muted-foreground mb-4">
-                  Ready to start scanning barcodes.
-                </p>
-                <div className="flex justify-center space-x-4">
-                  <Button onClick={goToScanner} data-testid="button-go-scanner" className="bg-emerald-600 hover:bg-emerald-700">
-                    <Scan className="h-4 w-4 mr-2" />
-                    Go to Scanner
-                  </Button>
-                  <Button variant="outline" onClick={downloadExcel} data-testid="button-download">
-                    <Download className="h-4 w-4 mr-2" />
-                    Download Data
-                  </Button>
-                  <div className="relative">
-                    <input
-                      type="file"
-                      accept=".xlsx,.xls"
-                      onChange={onExcelUpload}
-                      className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
-                      id="excel-upload"
-                    />
-                    <Button variant="secondary">
-                      <Book className="h-4 w-4 mr-2" />
-                      Import Excel
-                    </Button>
+                {isComplete && !hasError && (
+                  <div>
+                    <h2 className="text-xl font-semibold mb-2 text-card-foreground">Data Loaded Successfully!</h2>
+                    <p className="text-sm text-muted-foreground mb-4">
+                      Ready to start scanning barcodes. Redirecting to scanner in {countdownSeconds} seconds...
+                    </p>
+                    <div className="flex justify-center space-x-4">
+                      <Button onClick={goToScanner} data-testid="button-go-scanner">
+                        <Scan className="h-4 w-4 mr-2" />
+                        Go to Scanner Now
+                      </Button>
+                      <Button variant="outline" onClick={downloadExcel} data-testid="button-download">
+                        <Download className="h-4 w-4 mr-2" />
+                        Download Data
+                      </Button>
+                    </div>
                   </div>
-                </div>
-              </div>
-            )}
+                )}
                 
                 {hasError && (
                   <div>
@@ -335,25 +274,10 @@ export default function LiquorConverter() {
                     <p className="text-sm text-muted-foreground mb-4">
                       Unable to load data from the Michigan state website
                     </p>
-                    <div className="flex justify-center space-x-4">
-                      <Button onClick={retryDataLoad} variant="outline" data-testid="button-retry">
-                        <RefreshCw className="h-4 w-4 mr-2" />
-                        Retry Loading
-                      </Button>
-                      <div className="relative">
-                        <input
-                          type="file"
-                          accept=".xlsx,.xls"
-                          onChange={onExcelUpload}
-                          className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
-                          id="excel-upload-error"
-                        />
-                        <Button variant="secondary">
-                          <Book className="h-4 w-4 mr-2" />
-                          Import Excel
-                        </Button>
-                      </div>
-                    </div>
+                    <Button onClick={retryDataLoad} variant="outline" data-testid="button-retry">
+                      <RefreshCw className="h-4 w-4 mr-2" />
+                      Retry Loading
+                    </Button>
                   </div>
                 )}
               </div>
