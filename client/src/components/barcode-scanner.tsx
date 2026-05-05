@@ -32,6 +32,14 @@ const ENGINE_LABELS: Record<Engine, string> = {
   zxing:  "Standard mode",
 };
 
+// How many consecutive frames the same barcode must appear before we accept it.
+// At ~60 fps this means ~3 frames ≈ 50 ms — fast enough to feel instant but
+// prevents a barcode that barely grazed the frame from firing.
+const CONFIRM_FRAMES = 3;
+// After a successful scan, ignore everything for this many milliseconds so the
+// user can lift the scanner away without re-triggering the same bottle.
+const SCAN_COOLDOWN_MS = 1500;
+
 export function BarcodeScanner({ onScan, isActive, onToggle }: BarcodeScannerProps) {
   const videoRef   = useRef<HTMLVideoElement>(null);
   const canvasRef  = useRef<HTMLCanvasElement>(null);
@@ -39,6 +47,13 @@ export function BarcodeScanner({ onScan, isActive, onToggle }: BarcodeScannerPro
   const detectorRef = useRef<any>(null);
   const animFrameRef = useRef<number>(0);
   const zxingReader  = useRef<BrowserMultiFormatReader>();
+
+  // Confirmation state — same barcode must appear N frames in a row
+  const candidateRef      = useRef<string>("");
+  const candidateCountRef = useRef<number>(0);
+  // Cooldown — absolute timestamp until which we ignore all detections
+  const cooldownUntilRef  = useRef<number>(0);
+  // Duplicate suppression — same barcode blocked for 2 s after emitting
   const lastScanRef  = useRef<string>("");
   const lastTimeRef  = useRef<number>(0);
 
@@ -50,12 +65,42 @@ export function BarcodeScanner({ onScan, isActive, onToggle }: BarcodeScannerPro
   const [manualInput, setManualInput] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
 
-  // ── debounced emit (same barcode ignored within 2 s) ─────────────────────
+  // ── confirmation + cooldown logic ────────────────────────────────────────
+  // Called on every detected code from any engine.
+  // Returns true only when the code has been seen CONFIRM_FRAMES times in a row
+  // AND we're not in a post-scan cooldown.
+  const confirmCode = useCallback((code: string): boolean => {
+    const now = Date.now();
+
+    // Still cooling down after the last scan
+    if (now < cooldownUntilRef.current) return false;
+
+    if (code === candidateRef.current) {
+      candidateCountRef.current += 1;
+    } else {
+      // New candidate — reset counter
+      candidateRef.current = code;
+      candidateCountRef.current = 1;
+    }
+
+    return candidateCountRef.current >= CONFIRM_FRAMES;
+  }, []);
+
+  // ── final emit (dedup + cooldown reset) ──────────────────────────────────
   const emitScan = useCallback((code: string) => {
     const now = Date.now();
+
+    // Suppress the same barcode within 2 s (so scanning next bottle works fine)
     if (code === lastScanRef.current && now - lastTimeRef.current < 2000) return;
+
     lastScanRef.current = code;
     lastTimeRef.current = now;
+    cooldownUntilRef.current = now + SCAN_COOLDOWN_MS;
+
+    // Reset confirmation counter so the next barcode starts fresh
+    candidateRef.current = "";
+    candidateCountRef.current = 0;
+
     setLastScan(code);
     onScan(code);
   }, [onScan]);
@@ -79,14 +124,21 @@ export function BarcodeScanner({ onScan, isActive, onToggle }: BarcodeScannerPro
       }
       try {
         const results = await detectorRef.current.detect(video);
-        if (results.length > 0) emitScan(results[0].rawValue);
+        if (results.length > 0) {
+          const code = results[0].rawValue;
+          if (confirmCode(code)) emitScan(code);
+        } else {
+          // Nothing in frame — reset candidate so a partial glimpse doesn't count
+          candidateRef.current = "";
+          candidateCountRef.current = 0;
+        }
       } catch { /* no barcode in frame */ }
       animFrameRef.current = requestAnimationFrame(scan);
     };
 
     setEngine("native");
     animFrameRef.current = requestAnimationFrame(scan);
-  }, [emitScan]);
+  }, [emitScan, confirmCode]);
 
   // ── 2. ZBar WASM (iOS Safari, Firefox) ──────────────────────────────────
   const startZbarScanner = useCallback(async () => {
@@ -111,7 +163,13 @@ export function BarcodeScanner({ onScan, isActive, onToggle }: BarcodeScannerPro
       try {
         const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
         const results   = await scanImageData(imageData);
-        if (results.length > 0) emitScan(results[0].decode());
+        if (results.length > 0) {
+          const code = results[0].decode();
+          if (confirmCode(code)) emitScan(code);
+        } else {
+          candidateRef.current = "";
+          candidateCountRef.current = 0;
+        }
       } catch { /* no barcode in frame */ }
 
       animFrameRef.current = requestAnimationFrame(scan);
@@ -119,7 +177,7 @@ export function BarcodeScanner({ onScan, isActive, onToggle }: BarcodeScannerPro
 
     setEngine("zbar");
     animFrameRef.current = requestAnimationFrame(scan);
-  }, [emitScan]);
+  }, [emitScan, confirmCode]);
 
   // ── 3. ZXing fallback ────────────────────────────────────────────────────
   const startZxingScanner = useCallback(async () => {
@@ -131,12 +189,19 @@ export function BarcodeScanner({ onScan, isActive, onToggle }: BarcodeScannerPro
       undefined,
       videoRef.current!,
       (result, err) => {
-        if (result) emitScan(result.getText());
+        if (result) {
+          const code = result.getText();
+          if (confirmCode(code)) emitScan(code);
+        } else {
+          // No barcode in this frame — reset candidate
+          candidateRef.current = "";
+          candidateCountRef.current = 0;
+        }
         if (err && err.name !== "NotFoundException") console.error("ZXing:", err);
       }
     );
     setEngine("zxing");
-  }, [emitScan]);
+  }, [emitScan, confirmCode]);
 
   // ── Start camera then pick best engine ───────────────────────────────────
   const startScanning = useCallback(async () => {
