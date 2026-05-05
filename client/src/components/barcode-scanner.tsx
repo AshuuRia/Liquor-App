@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { BrowserMultiFormatReader } from "@zxing/browser";
 import { DecodeHintType } from "@zxing/library";
+import { scanImageData, setModuleArgs } from "@undecaf/zbar-wasm";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -8,58 +9,66 @@ import { Label } from "@/components/ui/label";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Camera, CameraOff, RotateCcw, Keyboard, Scan, Zap } from "lucide-react";
 
+// Point the zbar-wasm loader at the packaged .wasm file via Vite's ?url import
+// @ts-ignore
+import zbarWasmUrl from "@undecaf/zbar-wasm/dist/zbar.wasm?url";
+setModuleArgs({ locateFile: () => zbarWasmUrl });
+
+// ── capability flags ────────────────────────────────────────────────────────
+const hasBarcodeDetector = typeof window !== "undefined" && "BarcodeDetector" in window;
+
+// Describe which engine is in use for the UI badge
+type Engine = "native" | "zbar" | "zxing";
+
 interface BarcodeScannerProps {
   onScan: (barcode: string) => void;
   isActive: boolean;
   onToggle: () => void;
 }
 
-// Check if the native BarcodeDetector API is available (Chrome/Edge)
-const hasBarcodeDetector = typeof window !== "undefined" && "BarcodeDetector" in window;
+const ENGINE_LABELS: Record<Engine, string> = {
+  native: "⚡ Fast mode (native)",
+  zbar:   "⚡ Fast mode (ZBar)",
+  zxing:  "Standard mode",
+};
 
 export function BarcodeScanner({ onScan, isActive, onToggle }: BarcodeScannerProps) {
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const streamRef = useRef<MediaStream | null>(null);
+  const videoRef   = useRef<HTMLVideoElement>(null);
+  const canvasRef  = useRef<HTMLCanvasElement>(null);
+  const streamRef  = useRef<MediaStream | null>(null);
   const detectorRef = useRef<any>(null);
   const animFrameRef = useRef<number>(0);
-  const zxingReader = useRef<BrowserMultiFormatReader>();
-  const lastScanRef = useRef<string>("");
-  const lastScanTimeRef = useRef<number>(0);
+  const zxingReader  = useRef<BrowserMultiFormatReader>();
+  const lastScanRef  = useRef<string>("");
+  const lastTimeRef  = useRef<number>(0);
 
   const [isScanning, setIsScanning] = useState(false);
-  const [error, setError] = useState<string>("");
+  const [engine, setEngine] = useState<Engine | null>(null);
+  const [error,  setError]  = useState<string>("");
   const [lastScan, setLastScan] = useState<string>("");
   const [scanMode, setScanMode] = useState<"camera" | "manual">("manual");
   const [manualInput, setManualInput] = useState("");
-  const [usingNativeApi, setUsingNativeApi] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  // Debounce: ignore the same barcode within 2 seconds
+  // ── debounced emit (same barcode ignored within 2 s) ─────────────────────
   const emitScan = useCallback((code: string) => {
     const now = Date.now();
-    if (code === lastScanRef.current && now - lastScanTimeRef.current < 2000) return;
+    if (code === lastScanRef.current && now - lastTimeRef.current < 2000) return;
     lastScanRef.current = code;
-    lastScanTimeRef.current = now;
+    lastTimeRef.current = now;
     setLastScan(code);
     onScan(code);
   }, [onScan]);
 
-  // ── Native BarcodeDetector loop ──────────────────────────────────────────
+  // ── 1. Native BarcodeDetector (Chrome / Edge) ────────────────────────────
   const startNativeScanner = useCallback(async () => {
-    if (!videoRef.current) return;
-
     try {
-      (detectorRef.current as any) = new (window as any).BarcodeDetector({
-        formats: [
-          "ean_13", "ean_8", "upc_a", "upc_e",
-          "code_128", "code_39", "code_93", "itf",
-          "qr_code", "pdf417", "data_matrix",
-        ],
+      detectorRef.current = new (window as any).BarcodeDetector({
+        formats: ["ean_13","ean_8","upc_a","upc_e","code_128","code_39",
+                  "code_93","itf","qr_code","pdf417","data_matrix"],
       });
     } catch {
-      // Some browsers support BarcodeDetector but with limited formats
-      (detectorRef.current as any) = new (window as any).BarcodeDetector();
+      detectorRef.current = new (window as any).BarcodeDetector();
     }
 
     const scan = async () => {
@@ -69,94 +78,112 @@ export function BarcodeScanner({ onScan, isActive, onToggle }: BarcodeScannerPro
         return;
       }
       try {
-        const barcodes = await detectorRef.current.detect(video);
-        if (barcodes.length > 0) {
-          emitScan(barcodes[0].rawValue);
-        }
-      } catch {
-        // Ignore detection errors (e.g. no barcode in frame)
-      }
+        const results = await detectorRef.current.detect(video);
+        if (results.length > 0) emitScan(results[0].rawValue);
+      } catch { /* no barcode in frame */ }
       animFrameRef.current = requestAnimationFrame(scan);
     };
 
+    setEngine("native");
     animFrameRef.current = requestAnimationFrame(scan);
   }, [emitScan]);
 
-  // ── ZXing fallback loop ──────────────────────────────────────────────────
-  const startZxingScanner = useCallback(async () => {
-    if (!videoRef.current) return;
+  // ── 2. ZBar WASM (iOS Safari, Firefox) ──────────────────────────────────
+  const startZbarScanner = useCallback(async () => {
+    const canvas = canvasRef.current!;
+    const ctx = canvas.getContext("2d", { willReadFrequently: true })!;
 
-    // TRY_HARDER makes ZXing spend more effort per frame — critical for
-    // reading barcodes that are small or at a slight angle (i.e. from a distance)
+    const scan = async () => {
+      const video = videoRef.current;
+      if (!video || video.readyState < 2 || !video.videoWidth) {
+        animFrameRef.current = requestAnimationFrame(scan);
+        return;
+      }
+
+      // Match canvas size to actual camera output
+      if (canvas.width !== video.videoWidth) {
+        canvas.width  = video.videoWidth;
+        canvas.height = video.videoHeight;
+      }
+
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+      try {
+        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const results   = await scanImageData(imageData);
+        if (results.length > 0) emitScan(results[0].decode());
+      } catch { /* no barcode in frame */ }
+
+      animFrameRef.current = requestAnimationFrame(scan);
+    };
+
+    setEngine("zbar");
+    animFrameRef.current = requestAnimationFrame(scan);
+  }, [emitScan]);
+
+  // ── 3. ZXing fallback ────────────────────────────────────────────────────
+  const startZxingScanner = useCallback(async () => {
     const hints = new Map();
     hints.set(DecodeHintType.TRY_HARDER, true);
-
     zxingReader.current = new BrowserMultiFormatReader(hints);
 
     await zxingReader.current.decodeFromVideoDevice(
       undefined,
-      videoRef.current,
+      videoRef.current!,
       (result, err) => {
         if (result) emitScan(result.getText());
-        if (err && err.name !== "NotFoundException") {
-          console.error("ZXing error:", err);
-        }
+        if (err && err.name !== "NotFoundException") console.error("ZXing:", err);
       }
     );
+    setEngine("zxing");
   }, [emitScan]);
 
-  // ── Start camera + chosen engine ─────────────────────────────────────────
+  // ── Start camera then pick best engine ───────────────────────────────────
   const startScanning = useCallback(async () => {
     setError("");
     try {
-      // High resolution gives the decoder many more pixels to work with,
-      // which is the single biggest factor in reading barcodes from a distance.
-      // The iPhone 17 Pro Max camera can do 4K — ask for it and let the OS
-      // downscale if needed. Continuous autofocus keeps things sharp while moving.
-      const constraints: MediaStreamConstraints = {
+      const stream = await navigator.mediaDevices.getUserMedia({
         video: {
           facingMode: "environment",
           width:  { ideal: 3840, min: 1280 },
-          height: { ideal: 2160, min: 720 },
-          // @ts-ignore — advanced constraints are valid but not in all TS definitions
+          height: { ideal: 2160, min: 720  },
+          // @ts-ignore — valid but absent from older TS lib types
           advanced: [{ focusMode: "continuous" }],
         },
-      };
-      const stream = await navigator.mediaDevices.getUserMedia(constraints);
-      streamRef.current = stream;
+      });
 
+      streamRef.current = stream;
       const video = videoRef.current!;
       video.srcObject = stream;
       await video.play();
-
       setIsScanning(true);
 
       if (hasBarcodeDetector) {
-        setUsingNativeApi(true);
         await startNativeScanner();
       } else {
-        setUsingNativeApi(false);
-        await startZxingScanner();
+        // Try ZBar; fall back to ZXing if it fails to initialise
+        try {
+          await startZbarScanner();
+        } catch (e) {
+          console.warn("ZBar failed to init, falling back to ZXing:", e);
+          await startZxingScanner();
+        }
       }
     } catch (err) {
-      const msg = err instanceof Error ? err.message : "Failed to start camera";
-      setError(msg);
+      setError(err instanceof Error ? err.message : "Failed to start camera");
       setIsScanning(false);
     }
-  }, [startNativeScanner, startZxingScanner]);
+  }, [startNativeScanner, startZbarScanner, startZxingScanner]);
 
   // ── Stop everything ──────────────────────────────────────────────────────
   const stopScanning = useCallback(() => {
     cancelAnimationFrame(animFrameRef.current);
     zxingReader.current?.stopContinuousDecode?.();
-
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach(t => t.stop());
-      streamRef.current = null;
-    }
+    streamRef.current?.getTracks().forEach(t => t.stop());
+    streamRef.current = null;
     if (videoRef.current) videoRef.current.srcObject = null;
-
     setIsScanning(false);
+    setEngine(null);
     lastScanRef.current = "";
   }, []);
 
@@ -167,11 +194,8 @@ export function BarcodeScanner({ onScan, isActive, onToggle }: BarcodeScannerPro
 
   // ── Lifecycle ────────────────────────────────────────────────────────────
   useEffect(() => {
-    if (isActive && scanMode === "camera") {
-      startScanning();
-    } else {
-      stopScanning();
-    }
+    if (isActive && scanMode === "camera") startScanning();
+    else stopScanning();
     return stopScanning;
   }, [isActive, scanMode]);
 
@@ -191,15 +215,17 @@ export function BarcodeScanner({ onScan, isActive, onToggle }: BarcodeScannerPro
     if (e.key === "Enter") handleManualScan();
   };
 
+  // ── Render ────────────────────────────────────────────────────────────────
   return (
     <Card>
       <CardHeader>
         <CardTitle className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             <span>Barcode Scanner</span>
-            {usingNativeApi && isScanning && (
+            {engine && engine !== "zxing" && (
               <span className="flex items-center gap-1 text-xs font-normal text-emerald-600 bg-emerald-50 dark:bg-emerald-900/20 px-2 py-0.5 rounded-full">
-                <Zap className="h-3 w-3" /> Fast mode
+                <Zap className="h-3 w-3" />
+                {engine === "native" ? "Native" : "ZBar"} — fast mode
               </span>
             )}
           </div>
@@ -228,7 +254,7 @@ export function BarcodeScanner({ onScan, isActive, onToggle }: BarcodeScannerPro
       </CardHeader>
 
       <CardContent>
-        <Tabs value={scanMode} onValueChange={(v) => setScanMode(v as "camera" | "manual")}>
+        <Tabs value={scanMode} onValueChange={v => setScanMode(v as "camera" | "manual")}>
           <TabsList className="grid w-full grid-cols-2 mb-4">
             <TabsTrigger value="manual" className="flex items-center space-x-2" data-testid="tab-manual">
               <Keyboard className="h-4 w-4" />
@@ -254,7 +280,7 @@ export function BarcodeScanner({ onScan, isActive, onToggle }: BarcodeScannerPro
                   id="barcode-input"
                   ref={inputRef}
                   value={manualInput}
-                  onChange={(e) => setManualInput(e.target.value)}
+                  onChange={e => setManualInput(e.target.value)}
                   onKeyPress={handleKeyPress}
                   placeholder="Scan or type barcode here..."
                   className="flex-1"
@@ -284,7 +310,6 @@ export function BarcodeScanner({ onScan, isActive, onToggle }: BarcodeScannerPro
             )}
 
             <div className="relative">
-              {/* Video element — always rendered so the ref is stable */}
               <video
                 ref={videoRef}
                 className="w-full h-64 bg-black rounded-md object-cover"
@@ -293,7 +318,7 @@ export function BarcodeScanner({ onScan, isActive, onToggle }: BarcodeScannerPro
                 playsInline
                 data-testid="video-scanner"
               />
-              {/* Hidden canvas used if we ever need frame capture */}
+              {/* Off-screen canvas used by ZBar to grab frames */}
               <canvas ref={canvasRef} className="hidden" />
 
               {(!isActive || !isScanning) && (
@@ -301,41 +326,27 @@ export function BarcodeScanner({ onScan, isActive, onToggle }: BarcodeScannerPro
                   <div className="text-center">
                     <Camera className="h-12 w-12 text-muted-foreground mx-auto mb-2" />
                     <p className="text-muted-foreground">Click "Start Scanner" to begin</p>
-                    {hasBarcodeDetector && (
-                      <p className="text-xs text-emerald-600 mt-1 flex items-center justify-center gap-1">
-                        <Zap className="h-3 w-3" /> Native fast scanning available
-                      </p>
-                    )}
+                    <p className="text-xs text-emerald-600 mt-1 flex items-center justify-center gap-1">
+                      <Zap className="h-3 w-3" />
+                      {hasBarcodeDetector ? "Native fast scanning" : "ZBar fast scanning"} available
+                    </p>
                   </div>
                 </div>
               )}
 
               {isActive && isScanning && (
                 <div className="absolute inset-0 border-2 border-primary rounded-md pointer-events-none">
-                  {/* Aim overlay */}
-                  <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-56 h-28 rounded-lg"
-                    style={{ border: "3px solid rgba(99,102,241,0.7)", boxShadow: "0 0 0 2000px rgba(0,0,0,0.25)" }} />
-                  {/* Corner marks */}
-                  {[
-                    "top-[calc(50%-56px)] left-[calc(50%-112px)]",
-                    "top-[calc(50%-56px)] right-[calc(50%-112px)]",
-                    "bottom-[calc(50%-56px)] left-[calc(50%-112px)]",
-                    "bottom-[calc(50%-56px)] right-[calc(50%-112px)]",
-                  ].map((cls, i) => (
-                    <div key={i} className={`absolute w-4 h-4 border-primary ${cls}`}
-                      style={{
-                        borderWidth: "3px 0 0 3px",
-                        transform: i === 1 ? "scaleX(-1)" : i === 2 ? "scaleY(-1)" : i === 3 ? "scale(-1,-1)" : undefined,
-                      }} />
-                  ))}
+                  <div
+                    className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-56 h-28 rounded-lg"
+                    style={{ border: "3px solid rgba(99,102,241,0.7)", boxShadow: "0 0 0 2000px rgba(0,0,0,0.25)" }}
+                  />
                 </div>
               )}
             </div>
 
-            {isScanning && (
+            {isScanning && engine && (
               <p className="text-center text-sm text-muted-foreground">
-                Point your camera at a barcode to scan
-                {usingNativeApi ? " — using fast native detection" : ""}
+                Point your camera at a barcode · {ENGINE_LABELS[engine]}
               </p>
             )}
           </TabsContent>
