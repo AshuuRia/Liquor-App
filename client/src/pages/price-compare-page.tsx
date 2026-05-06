@@ -573,13 +573,16 @@ export default function PriceComparePage() {
                           <div className="flex items-center gap-1 justify-end">
                             <span className="text-muted-foreground text-sm">$</span>
                             <input
-                              type="number"
-                              step="0.01"
-                              min="0"
-                              value={row.newPrice.toFixed(2)}
-                              onChange={e => {
-                                const v = parseFloat(e.target.value);
-                                if (!isNaN(v)) updateRow(origIdx, { newPrice: Math.round(v * 100) / 100 });
+                              key={`${origIdx}-${row.newPrice}`}
+                              type="text"
+                              inputMode="decimal"
+                              defaultValue={row.newPrice.toFixed(2)}
+                              onBlur={e => {
+                                const raw = e.target.value.replace(/[^0-9.]/g, '');
+                                const v = parseFloat(raw);
+                                const rounded = isNaN(v) ? row.newPrice : Math.round(v * 100) / 100;
+                                e.target.value = rounded.toFixed(2);
+                                updateRow(origIdx, { newPrice: rounded });
                               }}
                               className="w-20 text-right rounded border border-border bg-background px-2 py-1 text-sm font-medium focus:outline-none focus:ring-1 focus:ring-primary tabular-nums"
                             />
