@@ -1329,23 +1329,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
         const fields = parseCsvLine(lines[i]);
         if (fields.length < 2) continue;
 
-        // Strip Excel's ="value" format used to preserve leading zeros
-        let rawUpc  = (fields[upcIdx]  || '').trim();
-        if (rawUpc.startsWith('="') && rawUpc.endsWith('"')) {
-          rawUpc = rawUpc.slice(2, -1);
-        } else if (rawUpc.startsWith('=')) {
-          rawUpc = rawUpc.slice(1);
-        }
+        // UPCs and liquor codes are purely numeric — strip any Excel ="..." artifacts
+        const stripExcel = (v: string) => v.replace(/[="]/g, '').trim();
+        const rawUpc  = stripExcel((fields[upcIdx]  || '').trim());
         const rawName = (fields[nameIdx] || '').trim();
         const rawPrice = priceIdx >= 0 ? (fields[priceIdx] || '').trim() : '';
         const rawCents = centsIdx >= 0 ? (fields[centsIdx] || '').trim() : '';
         const dept     = deptIdx >= 0  ? (fields[deptIdx]  || '').trim() : 'Liquor';
-        let sizeCode   = sizeIdx >= 0  ? (fields[sizeIdx]  || '').trim() : '';
-        if (sizeCode.startsWith('="') && sizeCode.endsWith('"')) {
-          sizeCode = sizeCode.slice(2, -1);
-        } else if (sizeCode.startsWith('=')) {
-          sizeCode = sizeCode.slice(1);
-        }
+        const sizeCode = stripExcel(sizeIdx >= 0 ? (fields[sizeIdx] || '').trim() : '');
 
         if (!rawUpc && !rawName) continue;
 
