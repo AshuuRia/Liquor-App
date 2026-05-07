@@ -90,7 +90,26 @@
 
   body {
     @apply font-sans antialiased bg-background text-foreground;
+    /* Prevent text size adjustment on iOS */
+    -webkit-text-size-adjust: 100%;
+    /* Prevent pull-to-refresh interfering with scanner */
+    overscroll-behavior: none;
   }
+
+  /* Safe area for iOS notch / home indicator */
+  :root {
+    --safe-top: env(safe-area-inset-top);
+    --safe-bottom: env(safe-area-inset-bottom);
+  }
+}
+
+/* Slide-up sheet animation */
+@keyframes slideUp {
+  from { transform: translateY(100%); }
+  to   { transform: translateY(0); }
+}
+.animate-slide-up {
+  animation: slideUp 0.28s cubic-bezier(0.32, 0.72, 0, 1);
 }
 
 .file-drop-zone {
