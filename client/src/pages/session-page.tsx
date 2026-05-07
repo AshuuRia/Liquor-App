@@ -251,12 +251,20 @@ function ScannerView({ onScan, onClose }: { onScan: (code: string) => void; onCl
   );
 }
 
-// ── Scanned item card ─────────────────────────────────────────────────────────
+// ── Swipeable item card ───────────────────────────────────────────────────────
+const SWIPE_THRESHOLD = 72;
+const SWIPE_MAX = 88;
+
 function ItemCard({ item, sessionId, onDelete, onPriceUpdate }: {
   item: ScannedItem; sessionId: string; onDelete: () => void; onPriceUpdate: (newPrice: number) => void;
 }) {
   const [editing, setEditing] = useState(false);
   const [priceVal, setPriceVal] = useState("");
+  const [offset, setOffset] = useState(0);
+  const [swiping, setSwiping] = useState(false);
+  const touchStartX = useRef(0);
+  const touchStartY = useRef(0);
+  const isHorizontal = useRef<boolean | null>(null);
   const { toast } = useToast();
 
   const savePrice = async () => {
@@ -271,45 +279,111 @@ function ItemCard({ item, sessionId, onDelete, onPriceUpdate }: {
     } catch { toast({ variant: "destructive", title: "Failed to update price" }); }
   };
 
+  const onTouchStart = (e: React.TouchEvent) => {
+    if (editing) return;
+    touchStartX.current = e.touches[0].clientX;
+    touchStartY.current = e.touches[0].clientY;
+    isHorizontal.current = null;
+    setSwiping(true);
+  };
+
+  const onTouchMove = (e: React.TouchEvent) => {
+    if (!swiping || editing) return;
+    const dx = e.touches[0].clientX - touchStartX.current;
+    const dy = e.touches[0].clientY - touchStartY.current;
+
+    if (isHorizontal.current === null) {
+      if (Math.abs(dx) < 4 && Math.abs(dy) < 4) return;
+      isHorizontal.current = Math.abs(dx) > Math.abs(dy);
+    }
+
+    if (!isHorizontal.current) { setSwiping(false); return; }
+
+    e.preventDefault();
+    const clamped = Math.max(0, Math.min(SWIPE_MAX, -dx));
+    setOffset(clamped);
+  };
+
+  const onTouchEnd = () => {
+    if (!swiping) return;
+    setSwiping(false);
+    if (offset >= SWIPE_THRESHOLD) {
+      onDelete();
+    } else {
+      setOffset(0);
+    }
+  };
+
   const p = item.product;
-  if (!p) return (
-    <div className="bg-white dark:bg-zinc-900 rounded-xl px-4 py-3 flex items-center justify-between shadow-sm">
+
+  const cardContent = !p ? (
+    <div className="flex items-center justify-between px-4 py-3">
       <div>
         <div className="text-sm font-medium text-zinc-500">Unknown barcode</div>
         <div className="text-xs text-zinc-400">{item.scannedBarcode}</div>
       </div>
-      <button onClick={onDelete} className="p-1.5 rounded-lg text-red-400 active:bg-red-50"><Trash2 className="h-4 w-4" /></button>
     </div>
-  );
-
-  return (
-    <div className="bg-white dark:bg-zinc-900 rounded-xl px-4 py-3 shadow-sm" data-testid={`session-item-${item.id}`}>
+  ) : (
+    <div className="px-4 py-3">
       <div className="flex items-start justify-between gap-2">
         <div className="flex-1 min-w-0">
-          <div className="font-semibold text-sm text-zinc-900 dark:text-zinc-100 leading-tight">{p.brandName}</div>
+          <div className="font-semibold text-sm text-zinc-100 leading-tight">{p.brandName}</div>
           <div className="text-xs text-zinc-500 mt-0.5">{p.bottleSize} · {p.liquorCode}</div>
         </div>
         <div className="flex items-center gap-1.5 flex-shrink-0">
           {editing ? (
             <>
-              <Input value={priceVal} onChange={e => setPriceVal(e.target.value)} onKeyDown={e => e.key === "Enter" && savePrice()}
+              <Input value={priceVal} onChange={e => setPriceVal(e.target.value)}
+                onKeyDown={e => e.key === "Enter" && savePrice()}
                 className="w-20 h-7 text-sm" autoFocus />
               <button onClick={savePrice} className="p-1 text-green-500"><Check className="h-4 w-4" /></button>
               <button onClick={() => setEditing(false)} className="p-1 text-zinc-400"><X className="h-4 w-4" /></button>
             </>
           ) : (
             <>
-              <span className="text-sm font-bold text-blue-600 dark:text-blue-400">{fmt(p.shelfPrice)}</span>
-              <button onClick={() => { setEditing(true); setPriceVal(String(p.shelfPrice)); }} className="p-1 text-zinc-400"><Edit3 className="h-3.5 w-3.5" /></button>
+              <span className="text-sm font-bold text-blue-400">{fmt(p.shelfPrice)}</span>
+              <button onClick={() => { setEditing(true); setPriceVal(String(p.shelfPrice)); }}
+                className="p-1 text-zinc-500"><Edit3 className="h-3.5 w-3.5" /></button>
             </>
           )}
-          <button onClick={onDelete} className="p-1.5 rounded-lg text-red-400 active:bg-red-50"><Trash2 className="h-4 w-4" /></button>
         </div>
       </div>
-      <div className="flex gap-3 mt-1.5 text-xs text-zinc-400">
+      <div className="flex gap-3 mt-1.5 text-xs text-zinc-500">
         <span>ADA: {p.adaNumber}</span>
         {p.proof && <span>{p.proof}°</span>}
         <span>{p.vendorName}</span>
+      </div>
+    </div>
+  );
+
+  return (
+    <div
+      className="relative rounded-xl overflow-hidden"
+      data-testid={`session-item-${item.id}`}
+    >
+      {/* Red delete layer behind */}
+      <div
+        className="absolute inset-0 rounded-xl flex items-center justify-end pr-4"
+        style={{ backgroundColor: offset >= SWIPE_THRESHOLD ? "#ef4444" : "#7f1d1d" }}
+      >
+        <div className="flex flex-col items-center gap-0.5">
+          <Trash2 className="h-5 w-5 text-white" />
+          <span className="text-white text-[10px] font-semibold">Delete</span>
+        </div>
+      </div>
+
+      {/* Card that slides */}
+      <div
+        className="relative bg-zinc-900 rounded-xl shadow-sm"
+        style={{
+          transform: `translateX(-${offset}px)`,
+          transition: swiping ? "none" : "transform 0.25s cubic-bezier(0.25, 1, 0.5, 1)",
+        }}
+        onTouchStart={onTouchStart}
+        onTouchMove={onTouchMove}
+        onTouchEnd={onTouchEnd}
+      >
+        {cardContent}
       </div>
     </div>
   );
